@@ -30,7 +30,7 @@ Tested on **Mango Power M** (3-phase). The AGN8 protocol and register map were r
 ## Requirements
 
 - Python 3.8+
-- LAN access to the Mango Power M (default `192.168.10.129:8888`)
+- LAN access to the Mango Power M on port `8888`
 - `paho-mqtt` — only needed for `--mqtt` mode
 
 ```bash
@@ -47,10 +47,10 @@ git clone https://github.com/YOUR_USERNAME/mango-power-battery.git
 cd mango-power-battery
 
 # Single poll — verify it works
-python3 local_poll.py
+python3 local_poll.py --device-ip <your-device-ip>
 
 # Poll every 30s and publish to Home Assistant via MQTT
-python3 local_poll.py --loop 30 --mqtt --mqtt-broker <your-mqtt-broker-ip>
+python3 local_poll.py --device-ip <your-device-ip> --loop 30 --mqtt --mqtt-broker <your-mqtt-broker-ip>
 ```
 
 ---
@@ -61,7 +61,7 @@ python3 local_poll.py --loop 30 --mqtt --mqtt-broker <your-mqtt-broker-ip>
 python3 local_poll.py [options]
 
 Options:
-  --device-ip IP      Device IP address (default: 192.168.10.129)
+  --device-ip IP      Device IP address (required)
   --loop SECONDS      Poll repeatedly on this interval (default: run once)
   --raw               Include all non-zero raw registers in output
   --mqtt              Publish to MQTT broker (enables HA auto-discovery)

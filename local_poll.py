@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Local Mango Power M register poller — queries port 8888 with CMD=5 Modbus reads.
-No cloud, no ARP MITM required. Just needs LAN access to 192.168.10.129.
+No cloud, no ARP MITM required. Just needs LAN access to the device.
 
 Frame format: [7e][REQ:1B][SEQ:4B][CMD:1B][LEN:2B][DATA][CRC16-Modbus BE:2B][0d]
 CMD=5 payload request:  [addr][fc=03][reg_hi][reg_lo][cnt_hi][cnt_lo]
@@ -10,17 +10,15 @@ CMD=5 payload response: [addr][fc=03][reg_hi][reg_lo][n_bytes][data...][crc_lo][
 CRC16-Modbus is stored big-endian. Data is 32-bit IEEE 754 big-endian floats.
 
 Usage:
-  python3 local_poll.py                                   # single poll, print JSON
-  python3 local_poll.py --device-ip 192.168.10.129        # explicit device IP
-  python3 local_poll.py --loop 30                         # poll every 30s
-  python3 local_poll.py --raw                             # include all non-zero registers
-  python3 local_poll.py --loop 30 --mqtt                  # poll + publish to HA via MQTT
-  python3 local_poll.py --loop 30 --mqtt --mqtt-broker 192.168.10.5
+  python3 local_poll.py --device-ip <ip>                  # single poll, print JSON
+  python3 local_poll.py --device-ip <ip> --loop 30        # poll every 30s
+  python3 local_poll.py --device-ip <ip> --raw            # include all non-zero registers
+  python3 local_poll.py --device-ip <ip> --loop 30 --mqtt # poll + publish to HA via MQTT
+  python3 local_poll.py --device-ip <ip> --loop 30 --mqtt --mqtt-broker <broker-ip>
 """
 
 import socket, struct, time, json, argparse, math
 
-DEVICE_IP   = "192.168.10.129"
 DEVICE_PORT = 8888
 TIMEOUT     = 8
 
@@ -135,7 +133,7 @@ def parse_modbus_floats(payload: bytes, reg_start: int) -> dict:
 
 # ── Poll ─────────────────────────────────────────────────────────────────────
 
-def poll(include_raw: bool = False, device_ip: str = DEVICE_IP) -> dict:
+def poll(include_raw: bool = False, device_ip: str = "") -> dict:
     all_regs = {}
 
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -218,7 +216,7 @@ def mqtt_connect(broker: str, port: int, user: str = None, password: str = None)
 
 def main():
     parser = argparse.ArgumentParser(description='Poll Mango Power AGN8 on port 8888')
-    parser.add_argument('--device-ip',   default=DEVICE_IP,              metavar='IP',     help='Device IP address (default: %(default)s)')
+    parser.add_argument('--device-ip',   required=True,                  metavar='IP',     help='Device IP address')
     parser.add_argument('--loop',        type=int,   default=0,          metavar='SECONDS')
     parser.add_argument('--raw',         action='store_true')
     parser.add_argument('--mqtt',        action='store_true',            help='Publish to MQTT broker')
