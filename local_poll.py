@@ -18,7 +18,7 @@ Usage:
   python3 local_poll.py --iface wlp61s0 --loop 30 --mqtt        # loop with auto-discovery + MQTT
 """
 
-import socket, struct, time, json, argparse, math, fcntl, ipaddress
+import os, socket, struct, time, json, argparse, math, fcntl, ipaddress
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 DEVICE_PORT    = 8888
@@ -257,15 +257,15 @@ def mqtt_connect(broker: str, port: int, user: str = None, password: str = None)
 
 def main():
     parser = argparse.ArgumentParser(description='Poll Mango Power AGN8 on port 8888')
-    parser.add_argument('--device-ip',   default='',           metavar='IP',    help='Device IP or hostname (auto-discovered when --iface is given)')
-    parser.add_argument('--iface',       default='',           metavar='IFACE', help='Network interface to bind (e.g. wlp61s0); resolves local IP dynamically and enables auto-discovery')
-    parser.add_argument('--loop',        type=int, default=0,  metavar='SECONDS')
+    parser.add_argument('--device-ip',   default=os.environ.get('DEVICE_IP', ''),          metavar='IP',    help='Device IP or hostname (auto-discovered when --iface given) [env: DEVICE_IP]')
+    parser.add_argument('--iface',       default=os.environ.get('IFACE', ''),              metavar='IFACE', help='Network interface to bind (e.g. wlp61s0); enables auto-discovery [env: IFACE]')
+    parser.add_argument('--loop',        type=int, default=int(os.environ.get('POLL_INTERVAL', 0)), metavar='SECONDS', help='Poll interval in seconds, 0 = run once [env: POLL_INTERVAL]')
     parser.add_argument('--raw',         action='store_true')
-    parser.add_argument('--mqtt',        action='store_true',                   help='Publish to MQTT broker')
-    parser.add_argument('--mqtt-broker', default='localhost',  metavar='HOST')
-    parser.add_argument('--mqtt-port',   type=int, default=1883, metavar='PORT')
-    parser.add_argument('--mqtt-user',   default=None,         metavar='USER')
-    parser.add_argument('--mqtt-pass',   default=None,         metavar='PASS')
+    parser.add_argument('--mqtt',        action='store_true',  default=bool(os.environ.get('MQTT')), help='Publish to MQTT broker [env: MQTT=1]')
+    parser.add_argument('--mqtt-broker', default=os.environ.get('MQTT_BROKER', 'localhost'), metavar='HOST', help='[env: MQTT_BROKER]')
+    parser.add_argument('--mqtt-port',   type=int, default=int(os.environ.get('MQTT_PORT', 1883)), metavar='PORT', help='[env: MQTT_PORT]')
+    parser.add_argument('--mqtt-user',   default=os.environ.get('MQTT_USER'),              metavar='USER',  help='[env: MQTT_USER]')
+    parser.add_argument('--mqtt-pass',   default=os.environ.get('MQTT_PASS'),              metavar='PASS',  help='[env: MQTT_PASS]')
     args = parser.parse_args()
 
     if not args.device_ip and not args.iface:

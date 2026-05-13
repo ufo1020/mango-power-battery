@@ -1,13 +1,14 @@
 [Unit]
 Description=Mango Power M local poller
-After=network.target mosquitto.service
+After=network-online.target mosquitto.service
+Wants=network-online.target
 
 [Service]
-# Edit path and user to match your setup
-ExecStart=/usr/bin/python3 /home/pi/mango-power-battery/local_poll.py --loop 30 --mqtt --mqtt-broker localhost
-Restart=always
+EnvironmentFile=/etc/mango-power.env
+ExecStart=/usr/bin/python3 /opt/mango-power-battery/local_poll.py
+Restart=on-failure
 RestartSec=10
-User=pi
+User=nobody
 
 [Install]
 WantedBy=multi-user.target

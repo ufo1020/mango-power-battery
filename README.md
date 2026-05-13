@@ -59,39 +59,44 @@ python3 local_poll.py --device-ip <your-device-ip> --loop 30 --mqtt --mqtt-broke
 
 ### Docker
 
-`--network host` is required so the container can see host network interfaces and reach LAN devices:
+All options can be set via environment variables — the recommended way to configure the container:
 
 ```bash
-docker run --rm --network host ghcr.io/ufo1020/mango-power-battery \
-  --iface wlp61s0 --loop 30 --mqtt --mqtt-broker <your-mqtt-broker-ip>
-```
+# With --network host: full feature set, auto-discovers device via interface
+docker run -d --network host \
+  -e IFACE=wlp61s0 \
+  -e POLL_INTERVAL=30 \
+  -e MQTT=1 \
+  -e MQTT_BROKER=<your-mqtt-broker-ip> \
+  ghcr.io/ufo1020/mango-power-battery
 
-Without `--network host`, use `--device-ip` instead (no auto-discovery, no interface binding):
-
-```bash
-docker run --rm ghcr.io/ufo1020/mango-power-battery \
-  --device-ip <your-device-ip> --loop 30 --mqtt --mqtt-broker <your-mqtt-broker-ip>
+# Without --network host: specify device IP explicitly
+docker run -d \
+  -e DEVICE_IP=<your-device-ip> \
+  -e POLL_INTERVAL=30 \
+  -e MQTT=1 \
+  -e MQTT_BROKER=<your-mqtt-broker-ip> \
+  ghcr.io/ufo1020/mango-power-battery
 ```
 
 ---
 
-## Usage
+## Configuration
 
-```
-python3 local_poll.py [options]
+All options are available as CLI flags or environment variables:
 
-Options:
-  --device-ip IP      Device IP or hostname (auto-discovered when --iface is given)
-  --iface IFACE       Network interface to bind (e.g. wlp61s0); resolves local IP dynamically
-                      and enables auto-discovery — re-discovers if the device IP changes
-  --loop SECONDS      Poll repeatedly on this interval (default: run once)
-  --raw               Include all non-zero raw registers in output
-  --mqtt              Publish to MQTT broker (enables HA auto-discovery)
-  --mqtt-broker HOST  MQTT broker hostname or IP (default: localhost)
-  --mqtt-port PORT    MQTT broker port (default: 1883)
-  --mqtt-user USER    MQTT username (optional)
-  --mqtt-pass PASS    MQTT password (optional)
-```
+| CLI flag | Env var | Default | Description |
+|---|---|---|---|
+| `--device-ip` | `DEVICE_IP` | | Device IP or hostname (auto-discovered when `IFACE` set) |
+| `--iface` | `IFACE` | | Network interface (e.g. `wlp61s0`); enables auto-discovery |
+| `--loop` | `POLL_INTERVAL` | `0` | Poll interval in seconds; `0` = run once |
+| `--mqtt` | `MQTT=1` | off | Publish to MQTT broker |
+| `--mqtt-broker` | `MQTT_BROKER` | `localhost` | MQTT broker hostname or IP |
+| `--mqtt-port` | `MQTT_PORT` | `1883` | MQTT broker port |
+| `--mqtt-user` | `MQTT_USER` | | MQTT username |
+| `--mqtt-pass` | `MQTT_PASS` | | MQTT password |
+
+One of `--device-ip` / `DEVICE_IP` or `--iface` / `IFACE` is required.
 
 ---
 
@@ -169,12 +174,22 @@ No manual YAML configuration needed in Home Assistant.
 
 ## Run as a service (systemd)
 
-A ready-to-use unit file is in `systemd/mango-power.service`. Edit the `ExecStart` path and `User` to match your setup, then:
+The unit file in `systemd/mango-power.service` reads config from `/etc/mango-power.env`:
 
 ```bash
+# Create config file
+sudo tee /etc/mango-power.env <<EOF
+IFACE=wlp61s0
+POLL_INTERVAL=30
+MQTT=1
+MQTT_BROKER=<your-mqtt-broker-ip>
+EOF
+
+# Install and start
+sudo cp -r . /opt/mango-power-battery
 sudo cp systemd/mango-power.service /etc/systemd/system/
-sudo systemctl enable mango-power
-sudo systemctl start mango-power
+sudo systemctl daemon-reload
+sudo systemctl enable --now mango-power
 
 # Check logs
 sudo journalctl -u mango-power -f
