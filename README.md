@@ -41,12 +41,13 @@ pip install -r requirements.txt
 
 ## Quick start
 
+### Python
+
 ```bash
-# Clone
 git clone https://github.com/YOUR_USERNAME/mango-power-battery.git
 cd mango-power-battery
 
-# Auto-discover device on WiFi interface, single poll
+# Auto-discover device on a network interface, single poll
 python3 local_poll.py --iface wlp61s0
 
 # Auto-discover + poll every 30s + publish to Home Assistant via MQTT
@@ -54,6 +55,22 @@ python3 local_poll.py --iface wlp61s0 --loop 30 --mqtt --mqtt-broker <your-mqtt-
 
 # Or specify device IP explicitly
 python3 local_poll.py --device-ip <your-device-ip> --loop 30 --mqtt --mqtt-broker <your-mqtt-broker-ip>
+```
+
+### Docker
+
+`--network host` is required so the container can see host network interfaces and reach LAN devices:
+
+```bash
+docker run --rm --network host ghcr.io/ufo1020/mango-power-battery \
+  --iface wlp61s0 --loop 30 --mqtt --mqtt-broker <your-mqtt-broker-ip>
+```
+
+Without `--network host`, use `--device-ip` instead (no auto-discovery, no interface binding):
+
+```bash
+docker run --rm ghcr.io/ufo1020/mango-power-battery \
+  --device-ip <your-device-ip> --loop 30 --mqtt --mqtt-broker <your-mqtt-broker-ip>
 ```
 
 ---
