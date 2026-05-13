@@ -62,6 +62,7 @@ python3 local_poll.py [options]
 
 Options:
   --device-ip IP      Device IP address (required)
+  --bind-ip IP        Local IP to bind (forces routing through a specific network interface)
   --loop SECONDS      Poll repeatedly on this interval (default: run once)
   --raw               Include all non-zero raw registers in output
   --mqtt              Publish to MQTT broker (enables HA auto-discovery)
