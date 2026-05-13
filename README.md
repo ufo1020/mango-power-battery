@@ -47,14 +47,11 @@ pip install -r requirements.txt
 git clone https://github.com/YOUR_USERNAME/mango-power-battery.git
 cd mango-power-battery
 
-# Auto-discover device on a network interface, single poll
-python3 local_poll.py --iface wlp61s0
+# Zero config — scans all interfaces and auto-discovers the device
+python3 local_poll.py
 
-# Auto-discover + poll every 30s + publish to Home Assistant via MQTT
-python3 local_poll.py --iface wlp61s0 --loop 30 --mqtt --mqtt-broker <your-mqtt-broker-ip>
-
-# Or specify device IP explicitly
-python3 local_poll.py --device-ip <your-device-ip> --loop 30 --mqtt --mqtt-broker <your-mqtt-broker-ip>
+# Poll every 30s + publish to Home Assistant via MQTT
+python3 local_poll.py --loop 30 --mqtt --mqtt-broker <your-mqtt-broker-ip>
 ```
 
 ### Docker
@@ -62,9 +59,8 @@ python3 local_poll.py --device-ip <your-device-ip> --loop 30 --mqtt --mqtt-broke
 All options can be set via environment variables — the recommended way to configure the container:
 
 ```bash
-# With --network host: full feature set, auto-discovers device via interface
+# Zero config — scans all interfaces and auto-discovers the device
 docker run -d --network host \
-  -e IFACE=wlp61s0 \
   -e POLL_INTERVAL=30 \
   -e MQTT=1 \
   -e MQTT_BROKER=<your-mqtt-broker-ip> \
