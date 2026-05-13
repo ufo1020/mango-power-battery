@@ -96,7 +96,7 @@ All options are available as CLI flags or environment variables:
 | `--mqtt-user` | `MQTT_USER` | | MQTT username |
 | `--mqtt-pass` | `MQTT_PASS` | | MQTT password |
 
-One of `--device-ip` / `DEVICE_IP` or `--iface` / `IFACE` is required.
+All flags are optional. If neither `DEVICE_IP` nor `IFACE` is set, all network interfaces are scanned to find the device automatically.
 
 ---
 

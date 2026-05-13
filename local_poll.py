@@ -93,17 +93,26 @@ def _probe(host: str, port: int, timeout: float) -> bool:
     except OSError:
         return False
 
-def discover_device(iface: str, port: int = DEVICE_PORT, timeout: float = 0.5) -> str:
-    local_ip = get_iface_ip(iface)
-    subnet   = _iface_subnet(iface)
-    hosts    = [str(h) for h in subnet.hosts() if str(h) != local_ip]
-    print(f"Scanning {subnet} ({len(hosts)} hosts) for port {port}...", flush=True)
+def discover_device(iface: str = "", port: int = DEVICE_PORT, timeout: float = 0.5):
+    ifaces = [iface] if iface else [n for _, n in socket.if_nameindex() if n != "lo"]
+    host_to_bind = {}
+    for ifc in ifaces:
+        try:
+            local_ip = get_iface_ip(ifc)
+            for h in _iface_subnet(ifc).hosts():
+                host = str(h)
+                if host != local_ip:
+                    host_to_bind[host] = local_ip
+        except OSError:
+            continue
+    print(f"Scanning {len(host_to_bind)} hosts across {len(ifaces)} interface(s) for port {port}...", flush=True)
     with ThreadPoolExecutor(max_workers=64) as ex:
-        futures = {ex.submit(_probe, h, port, timeout): h for h in hosts}
+        futures = {ex.submit(_probe, h, port, timeout): h for h in host_to_bind}
         for f in as_completed(futures):
             if f.result():
-                return futures[f]
-    return ""
+                host = futures[f]
+                return host, host_to_bind[host]
+    return "", ""
 
 
 # ── AGN8 protocol ────────────────────────────────────────────────────────────
@@ -268,17 +277,16 @@ def main():
     parser.add_argument('--mqtt-pass',   default=os.environ.get('MQTT_PASS'),              metavar='PASS',  help='[env: MQTT_PASS]')
     args = parser.parse_args()
 
-    if not args.device_ip and not args.iface:
-        parser.error('one of --device-ip or --iface is required')
-
     device_ip = args.device_ip
     bind_ip   = get_iface_ip(args.iface) if args.iface else ""
 
     if not device_ip:
-        device_ip = discover_device(args.iface)
+        device_ip, discovered_bind = discover_device(args.iface)
         if not device_ip:
             print(json.dumps({'error': 'device not found on network', 'timestamp': time.strftime('%Y-%m-%dT%H:%M:%S')}))
             return
+        if not bind_ip:
+            bind_ip = discovered_bind
         print(f"Discovered device at {device_ip}", flush=True)
 
     mqtt_client = None
@@ -301,11 +309,13 @@ def main():
             # On failure, refresh both IPs in case either changed via DHCP
             if args.iface:
                 bind_ip = get_iface_ip(args.iface)
-                if not args.device_ip:
-                    new_ip = discover_device(args.iface)
-                    if new_ip and new_ip != device_ip:
-                        print(f"Re-discovered device at {new_ip}", flush=True)
-                        device_ip = new_ip
+            if not args.device_ip:
+                new_ip, new_bind = discover_device(args.iface)
+                if new_ip and new_ip != device_ip:
+                    print(f"Re-discovered device at {new_ip}", flush=True)
+                    device_ip = new_ip
+                    if not args.iface:
+                        bind_ip = new_bind
 
         if not args.loop:
             break
