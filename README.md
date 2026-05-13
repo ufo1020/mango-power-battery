@@ -61,6 +61,7 @@ python3 local_poll.py --loop 30 --mqtt --mqtt-broker <your-mqtt-broker-ip>
 python3 local_poll.py [options]
 
 Options:
+  --device-ip IP      Device IP address (default: 192.168.10.129)
   --loop SECONDS      Poll repeatedly on this interval (default: run once)
   --raw               Include all non-zero raw registers in output
   --mqtt              Publish to MQTT broker (enables HA auto-discovery)
@@ -69,8 +70,6 @@ Options:
   --mqtt-user USER    MQTT username (optional)
   --mqtt-pass PASS    MQTT password (optional)
 ```
-
-If your Mango Power M is at a different IP, edit `DEVICE_IP` at the top of `local_poll.py`.
 
 ---
 

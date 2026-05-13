@@ -10,10 +10,11 @@ CMD=5 payload response: [addr][fc=03][reg_hi][reg_lo][n_bytes][data...][crc_lo][
 CRC16-Modbus is stored big-endian. Data is 32-bit IEEE 754 big-endian floats.
 
 Usage:
-  python3 local_poll.py                          # single poll, print JSON
-  python3 local_poll.py --loop 30                # poll every 30s
-  python3 local_poll.py --raw                    # include all non-zero registers
-  python3 local_poll.py --loop 30 --mqtt         # poll + publish to HA via MQTT
+  python3 local_poll.py                                   # single poll, print JSON
+  python3 local_poll.py --device-ip 192.168.10.129        # explicit device IP
+  python3 local_poll.py --loop 30                         # poll every 30s
+  python3 local_poll.py --raw                             # include all non-zero registers
+  python3 local_poll.py --loop 30 --mqtt                  # poll + publish to HA via MQTT
   python3 local_poll.py --loop 30 --mqtt --mqtt-broker 192.168.10.5
 """
 
@@ -134,12 +135,12 @@ def parse_modbus_floats(payload: bytes, reg_start: int) -> dict:
 
 # ── Poll ─────────────────────────────────────────────────────────────────────
 
-def poll(include_raw: bool = False) -> dict:
+def poll(include_raw: bool = False, device_ip: str = DEVICE_IP) -> dict:
     all_regs = {}
 
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.settimeout(TIMEOUT)
-        s.connect((DEVICE_IP, DEVICE_PORT))
+        s.connect((device_ip, DEVICE_PORT))
         try:
             s.recv(256)  # discard CMD=1 banner
         except socket.timeout:
@@ -217,6 +218,7 @@ def mqtt_connect(broker: str, port: int, user: str = None, password: str = None)
 
 def main():
     parser = argparse.ArgumentParser(description='Poll Mango Power AGN8 on port 8888')
+    parser.add_argument('--device-ip',   default=DEVICE_IP,              metavar='IP',     help='Device IP address (default: %(default)s)')
     parser.add_argument('--loop',        type=int,   default=0,          metavar='SECONDS')
     parser.add_argument('--raw',         action='store_true')
     parser.add_argument('--mqtt',        action='store_true',            help='Publish to MQTT broker')
@@ -236,7 +238,7 @@ def main():
 
     while True:
         try:
-            data = poll(include_raw=args.raw)
+            data = poll(include_raw=args.raw, device_ip=args.device_ip)
             print(json.dumps(data, indent=2))
             if mqtt_client:
                 mqtt_client.publish(STATE_TOPIC, json.dumps(data))
