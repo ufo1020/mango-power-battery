@@ -10,17 +10,21 @@ CMD=5 payload response: [addr][fc=03][reg_hi][reg_lo][n_bytes][data...][crc_lo][
 CRC16-Modbus is stored big-endian. Data is 32-bit IEEE 754 big-endian floats.
 
 Usage:
-  python3 local_poll.py --device-ip <ip>                              # single poll, print JSON
-  python3 local_poll.py --device-ip <ip> --loop 30                   # poll every 30s
-  python3 local_poll.py --device-ip <ip> --raw                       # include all non-zero registers
-  python3 local_poll.py --device-ip <ip> --loop 30 --mqtt            # poll + publish to HA via MQTT
-  python3 local_poll.py --device-ip <ip> --bind-ip <local-ip>        # force routing via a specific interface
+  python3 local_poll.py --device-ip <ip>                        # single poll, print JSON
+  python3 local_poll.py --device-ip <ip> --loop 30              # poll every 30s
+  python3 local_poll.py --device-ip <ip> --raw                  # include all non-zero registers
+  python3 local_poll.py --device-ip <ip> --loop 30 --mqtt       # poll + publish to HA via MQTT
+  python3 local_poll.py --iface wlp61s0                         # auto-discover device, bind to iface
+  python3 local_poll.py --iface wlp61s0 --loop 30 --mqtt        # loop with auto-discovery + MQTT
 """
 
-import socket, struct, time, json, argparse, math
+import socket, struct, time, json, argparse, math, fcntl, ipaddress
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-DEVICE_PORT = 8888
-TIMEOUT     = 8
+DEVICE_PORT    = 8888
+TIMEOUT        = 8
+SIOCGIFADDR    = 0x8915
+SIOCGIFNETMASK = 0x891b
 
 READS = [
     (0x1270, 0x40),
@@ -65,6 +69,41 @@ HA_DEVICE = {
 
 STATE_TOPIC      = "mango_power/m/state"
 DISCOVERY_PREFIX = "homeassistant"
+
+
+# ── Network helpers ───────────────────────────────────────────────────────────
+
+def _ioctl_ip(iface: str, req: int) -> str:
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        buf = fcntl.ioctl(s.fileno(), req, struct.pack('256s', iface[:15].encode()))
+    return socket.inet_ntoa(buf[20:24])
+
+def get_iface_ip(iface: str) -> str:
+    return _ioctl_ip(iface, SIOCGIFADDR)
+
+def _iface_subnet(iface: str) -> ipaddress.IPv4Network:
+    ip   = _ioctl_ip(iface, SIOCGIFADDR)
+    mask = _ioctl_ip(iface, SIOCGIFNETMASK)
+    return ipaddress.IPv4Network(f"{ip}/{mask}", strict=False)
+
+def _probe(host: str, port: int, timeout: float) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+def discover_device(iface: str, port: int = DEVICE_PORT, timeout: float = 0.5) -> str:
+    local_ip = get_iface_ip(iface)
+    subnet   = _iface_subnet(iface)
+    hosts    = [str(h) for h in subnet.hosts() if str(h) != local_ip]
+    print(f"Scanning {subnet} ({len(hosts)} hosts) for port {port}...", flush=True)
+    with ThreadPoolExecutor(max_workers=64) as ex:
+        futures = {ex.submit(_probe, h, port, timeout): h for h in hosts}
+        for f in as_completed(futures):
+            if f.result():
+                return futures[f]
+    return ""
 
 
 # ── AGN8 protocol ────────────────────────────────────────────────────────────
@@ -133,8 +172,9 @@ def parse_modbus_floats(payload: bytes, reg_start: int) -> dict:
 
 # ── Poll ─────────────────────────────────────────────────────────────────────
 
-def poll(include_raw: bool = False, device_ip: str = "", bind_ip: str = "") -> dict:
+def poll(include_raw: bool = False, device_ip: str = "", iface: str = "") -> dict:
     all_regs = {}
+    bind_ip  = get_iface_ip(iface) if iface else ""
 
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.settimeout(TIMEOUT)
@@ -218,16 +258,27 @@ def mqtt_connect(broker: str, port: int, user: str = None, password: str = None)
 
 def main():
     parser = argparse.ArgumentParser(description='Poll Mango Power AGN8 on port 8888')
-    parser.add_argument('--device-ip',   required=True,                  metavar='IP',     help='Device IP address')
-    parser.add_argument('--bind-ip',     default='',                     metavar='IP',     help='Local IP to bind (forces routing through a specific network interface)')
-    parser.add_argument('--loop',        type=int,   default=0,          metavar='SECONDS')
+    parser.add_argument('--device-ip',   default='',           metavar='IP',    help='Device IP or hostname (auto-discovered when --iface is given)')
+    parser.add_argument('--iface',       default='',           metavar='IFACE', help='Network interface to bind (e.g. wlp61s0); resolves local IP dynamically and enables auto-discovery')
+    parser.add_argument('--loop',        type=int, default=0,  metavar='SECONDS')
     parser.add_argument('--raw',         action='store_true')
-    parser.add_argument('--mqtt',        action='store_true',            help='Publish to MQTT broker')
-    parser.add_argument('--mqtt-broker', default='localhost',            metavar='HOST')
-    parser.add_argument('--mqtt-port',   type=int,   default=1883,       metavar='PORT')
-    parser.add_argument('--mqtt-user',   default=None,                   metavar='USER')
-    parser.add_argument('--mqtt-pass',   default=None,                   metavar='PASS')
+    parser.add_argument('--mqtt',        action='store_true',                   help='Publish to MQTT broker')
+    parser.add_argument('--mqtt-broker', default='localhost',  metavar='HOST')
+    parser.add_argument('--mqtt-port',   type=int, default=1883, metavar='PORT')
+    parser.add_argument('--mqtt-user',   default=None,         metavar='USER')
+    parser.add_argument('--mqtt-pass',   default=None,         metavar='PASS')
     args = parser.parse_args()
+
+    if not args.device_ip and not args.iface:
+        parser.error('one of --device-ip or --iface is required')
+
+    device_ip = args.device_ip
+    if not device_ip:
+        device_ip = discover_device(args.iface)
+        if not device_ip:
+            print(json.dumps({'error': 'device not found on network', 'timestamp': time.strftime('%Y-%m-%dT%H:%M:%S')}))
+            return
+        print(f"Discovered device at {device_ip}", flush=True)
 
     mqtt_client = None
     if args.mqtt:
@@ -239,13 +290,19 @@ def main():
 
     while True:
         try:
-            data = poll(include_raw=args.raw, device_ip=args.device_ip, bind_ip=args.bind_ip)
+            data = poll(include_raw=args.raw, device_ip=device_ip, iface=args.iface)
             print(json.dumps(data, indent=2))
             if mqtt_client:
                 mqtt_client.publish(STATE_TOPIC, json.dumps(data))
         except Exception as e:
             data = {'error': str(e), 'timestamp': time.strftime('%Y-%m-%dT%H:%M:%S')}
             print(json.dumps(data, indent=2))
+            # Re-discover if we're using iface and device_ip wasn't fixed by user
+            if args.iface and not args.device_ip:
+                new_ip = discover_device(args.iface)
+                if new_ip and new_ip != device_ip:
+                    print(f"Re-discovered device at {new_ip}", flush=True)
+                    device_ip = new_ip
 
         if not args.loop:
             break

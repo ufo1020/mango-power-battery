@@ -46,10 +46,13 @@ pip install -r requirements.txt
 git clone https://github.com/YOUR_USERNAME/mango-power-battery.git
 cd mango-power-battery
 
-# Single poll — verify it works
-python3 local_poll.py --device-ip <your-device-ip>
+# Auto-discover device on WiFi interface, single poll
+python3 local_poll.py --iface wlp61s0
 
-# Poll every 30s and publish to Home Assistant via MQTT
+# Auto-discover + poll every 30s + publish to Home Assistant via MQTT
+python3 local_poll.py --iface wlp61s0 --loop 30 --mqtt --mqtt-broker <your-mqtt-broker-ip>
+
+# Or specify device IP explicitly
 python3 local_poll.py --device-ip <your-device-ip> --loop 30 --mqtt --mqtt-broker <your-mqtt-broker-ip>
 ```
 
@@ -61,8 +64,9 @@ python3 local_poll.py --device-ip <your-device-ip> --loop 30 --mqtt --mqtt-broke
 python3 local_poll.py [options]
 
 Options:
-  --device-ip IP      Device IP address (required)
-  --bind-ip IP        Local IP to bind (forces routing through a specific network interface)
+  --device-ip IP      Device IP or hostname (auto-discovered when --iface is given)
+  --iface IFACE       Network interface to bind (e.g. wlp61s0); resolves local IP dynamically
+                      and enables auto-discovery — re-discovers if the device IP changes
   --loop SECONDS      Poll repeatedly on this interval (default: run once)
   --raw               Include all non-zero raw registers in output
   --mqtt              Publish to MQTT broker (enables HA auto-discovery)
