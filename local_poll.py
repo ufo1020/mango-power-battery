@@ -172,9 +172,8 @@ def parse_modbus_floats(payload: bytes, reg_start: int) -> dict:
 
 # ── Poll ─────────────────────────────────────────────────────────────────────
 
-def poll(include_raw: bool = False, device_ip: str = "", iface: str = "") -> dict:
+def poll(include_raw: bool = False, device_ip: str = "", bind_ip: str = "") -> dict:
     all_regs = {}
-    bind_ip  = get_iface_ip(iface) if iface else ""
 
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.settimeout(TIMEOUT)
@@ -273,6 +272,8 @@ def main():
         parser.error('one of --device-ip or --iface is required')
 
     device_ip = args.device_ip
+    bind_ip   = get_iface_ip(args.iface) if args.iface else ""
+
     if not device_ip:
         device_ip = discover_device(args.iface)
         if not device_ip:
@@ -290,19 +291,21 @@ def main():
 
     while True:
         try:
-            data = poll(include_raw=args.raw, device_ip=device_ip, iface=args.iface)
+            data = poll(include_raw=args.raw, device_ip=device_ip, bind_ip=bind_ip)
             print(json.dumps(data, indent=2))
             if mqtt_client:
                 mqtt_client.publish(STATE_TOPIC, json.dumps(data))
         except Exception as e:
             data = {'error': str(e), 'timestamp': time.strftime('%Y-%m-%dT%H:%M:%S')}
             print(json.dumps(data, indent=2))
-            # Re-discover if we're using iface and device_ip wasn't fixed by user
-            if args.iface and not args.device_ip:
-                new_ip = discover_device(args.iface)
-                if new_ip and new_ip != device_ip:
-                    print(f"Re-discovered device at {new_ip}", flush=True)
-                    device_ip = new_ip
+            # On failure, refresh both IPs in case either changed via DHCP
+            if args.iface:
+                bind_ip = get_iface_ip(args.iface)
+                if not args.device_ip:
+                    new_ip = discover_device(args.iface)
+                    if new_ip and new_ip != device_ip:
+                        print(f"Re-discovered device at {new_ip}", flush=True)
+                        device_ip = new_ip
 
         if not args.loop:
             break
