@@ -88,8 +88,12 @@ def _iface_subnet(iface: str) -> ipaddress.IPv4Network:
 
 def _probe(host: str, port: int, timeout: float) -> bool:
     try:
-        with socket.create_connection((host, port), timeout=timeout):
-            return True
+        with socket.create_connection((host, port), timeout=timeout) as s:
+            s.settimeout(timeout)
+            banner = s.recv(256)
+            idx = banner.find(b'\x7e')
+            # AGN8 banner: 0x7e start, CMD byte at offset 6 is 0x01
+            return idx >= 0 and len(banner) > idx + 6 and banner[idx + 6] == 0x01
     except OSError:
         return False
 
