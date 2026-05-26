@@ -15,7 +15,7 @@ Integrates with **Home Assistant** via MQTT auto-discovery: plug it in and your 
 ## Features
 
 - Pure local LAN polling — no cloud account or internet access required
-- Reverse-engineered AGN8 binary protocol + Modbus register map (fully documented below)
+- Reverse-engineered binary protocol used by the AGN8 WiFi module + Modbus register map (fully documented below)
 - Real-time data: solar generation, battery state, home consumption, grid import/export
 - Home Assistant MQTT auto-discovery — entities appear automatically, no YAML needed
 - Availability topic: HA marks sensors unavailable if the poller stops
@@ -23,7 +23,7 @@ Integrates with **Home Assistant** via MQTT auto-discovery: plug it in and your 
 
 ## Supported device
 
-Tested on **Mango Power M** (3-phase). The AGN8 protocol and register map were reverse-engineered by observing cloud MQTT traffic. Other Mango Power models may work if they use the same port 8888 protocol — open an issue if you try one.
+Tested on **Mango Power M** (3-phase) with the bundled **AGN8 WiFi module** (the dongle that plugs into the battery system and exposes it on the LAN). The protocol and register map were reverse-engineered by observing cloud MQTT traffic. Other Mango Power models may work if they ship with the same AGN8 module — open an issue if you try one.
 
 ---
 
@@ -195,7 +195,7 @@ sudo journalctl -u mango-power -f
 
 ## Protocol reference
 
-The Mango Power M listens on TCP port 8888 using a proprietary binary protocol (AGN8).
+The **AGN8 WiFi module** (a dongle that plugs into the Mango Power M battery system) listens on TCP port 8888 using a proprietary binary protocol. The module bridges the battery's internal Modbus interface to the LAN; this poller speaks to the module, which then relays Modbus reads to the battery.
 
 ### Frame format
 
