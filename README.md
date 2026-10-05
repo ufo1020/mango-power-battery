@@ -244,9 +244,9 @@ Register data is **32-bit IEEE 754 big-endian floats** (two consecutive 16-bit M
 
 Register map confirmed by simultaneous comparison with the Mango Power app. Energy balance error < 1%.
 
-### Settings registers (read-only so far)
+### Settings registers (read/write)
 
-Identified by snapshotting all readable registers, changing one setting in the Mango Power app, and diffing. Each change below touched only the listed register(s). All values are **32-bit IEEE 754 big-endian floats** (two registers each), readable with `fc=03` (`fc=04` returns the same map).
+Identified by snapshotting all readable registers, changing one setting in the Mango Power app, and diffing. Each change below touched only the listed register(s). All values are **32-bit IEEE 754 big-endian floats** (two registers each), readable with `fc=03` (`fc=04` returns the same map) and writable as described under [Writing settings](#writing-settings).
 
 | Register | Setting | Format | Notes |
 |----------|---------|--------|-------|
@@ -272,15 +272,46 @@ A coarse `fc=03` sweep of `0x0000–0xffff` (step `0x100`) found these blocks; e
 | `0xc000–0xc0ff` | Time-of-use schedule (see settings table above); `0xc060–0xc066` = `ffffffff` (empty slots), `0xc0b4` = `0x7f` (possibly a weekday mask) |
 | `0xc100–0xc3xx` | Live telemetry |
 
-### Writing settings (work in progress)
+### Writing settings
 
-Local writes are **not working yet**. Findings so far:
+Writes use a **different command byte and a non-standard payload** from reads. This was confirmed by capturing the writes the cloud sends when a setting is changed in the app, then replaying the format locally and reading the register back.
 
-- A standard Modbus `fc=0x10` (write multiple registers) request relayed through CMD=5 is recognised by the controller — it answers with exception `0x90` rather than `illegal function`.
-- Writing an unmapped address (`0x0000`) returns `01 90 03`, as expected.
-- Writing the *current* value back to reserve SOC (`01 10 31 4a 00 02 04 41 b0 00 00`) is also rejected with `01 90 03`, and the register is unchanged.
+- **Command byte is `0x06`** (reads use `0x05`).
+- The Modbus payload **omits the 2-byte register-count field** that standard `fc=0x10` carries:
 
-So the controller rejects the standard request layout. Likely causes: a non-standard write payload (reads already use one — see the register-address echo above), a different target address or function code for writes, or an unlock step. The next step is to capture the write the cloud sends when a setting is changed in the app and replay that format locally.
+  ```
+  [addr=01][fc=0x10][reg_hi][reg_lo][n_bytes][float BE]
+  ```
+
+  e.g. writing reserve SOC = 21.0 to `0x314a`:
+
+  ```
+  frame:   7e 00 <seq:4> 06 0009 | 01 10 31 4a 04 41a80000 | <crc BE> 0d
+  ```
+- On success the device echoes a **standard** write-ack payload `01 10 <reg> 00 02` (CMD `0x06`); on refusal it returns an exception frame `01 90 <code>`.
+
+A standard request — command `0x05` and/or the extra `00 02` count field (`01 10 314a 0002 04 …`) — is rejected with `01 90 03`, which is what made this hard to find by guessing.
+
+> **Tip:** drain the connect banner before the first read/write and verify the echoed register address in read replies — the module can otherwise return banner bytes that look like a valid frame.
+
+#### Usage
+
+```bash
+# Reserve SOC to 20%
+python3 local_poll.py --set reserve_soc=20
+
+# Charge window 1: 01:00–05:00 at 5 kW (writes both power registers)
+python3 local_poll.py --set charge_start=01:00 --set charge_end=05:00 --set charge_power_kw=5
+```
+
+| Field | Register(s) | Range / format |
+|-------|-------------|----------------|
+| `reserve_soc` | `0x314a` | 1–100 (%) |
+| `charge_power_kw` | `0xc05a` + `0xc0ba` | 0–5 (kW; inverter caps at 5) |
+| `charge_start` | `0xc014` | `HH:MM` or `HHMM`, device local time |
+| `charge_end` | `0xc016` | `HH:MM` or `HHMM`, device local time |
+
+Each value is range-checked, written, and read back; the command exits non-zero if any register fails to confirm. Discharge-side settings are intentionally not writable.
 
 ---
 
@@ -289,7 +320,7 @@ So the controller rejects the standard request layout. Likely causes: a non-stan
 Issues and PRs welcome — especially:
 - Confirmed register mappings for other Mango Power models
 - Additional cumulative energy registers (0x1230–0x1262 range, likely kWh totals)
-- The write frame format the cloud uses for settings (see [Writing settings](#writing-settings-work-in-progress))
+- Register mappings for TOU windows 2+ and discharge-side settings
 - Docker / Home Assistant add-on packaging
 
 ---

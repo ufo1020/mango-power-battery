@@ -70,6 +70,17 @@ HA_DEVICE = {
 STATE_TOPIC      = "mango_power/m/state"
 DISCOVERY_PREFIX = "homeassistant"
 
+# Writable settings — see write_register() for the (non-standard) frame format.
+# Each value is clamped to [lo, hi] and read back to confirm before we report
+# success. Charge power is written to both registers the app touches.
+#   field: (registers, lo, hi, kind)   kind = pct | kw | hhmm
+WRITABLE = {
+    "reserve_soc":     ((0x314a,),         1.0,  100.0, "pct"),
+    "charge_power_kw": ((0xc05a, 0xc0ba),  0.0,    5.0, "kw"),    # inverter caps at 5 kW
+    "charge_start":    ((0xc014,),         0.0, 2359.0, "hhmm"),
+    "charge_end":      ((0xc016,),         0.0, 2359.0, "hhmm"),
+}
+
 
 # ── Network helpers ───────────────────────────────────────────────────────────
 
@@ -237,6 +248,90 @@ def poll(include_raw: bool = False, device_ip: str = "", bind_ip: str = "") -> d
     return result
 
 
+# ── Write / control ──────────────────────────────────────────────────────────
+
+def _connect(device_ip: str, bind_ip: str = "") -> socket.socket:
+    """Open a socket and drain the connect banner so it can't be mistaken for a
+    reply to the first read/write."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(TIMEOUT)
+    if bind_ip:
+        s.bind((bind_ip, 0))
+    s.connect((device_ip, DEVICE_PORT))
+    time.sleep(0.3)
+    try:
+        while len(s.recv(256)) == 256:
+            pass
+    except socket.timeout:
+        pass
+    return s
+
+def read_register(s: socket.socket, reg: int, seq: int = 0x7000):
+    """Read one 32-bit float register (CMD=5, fc=03), validating that the reply
+    echoes the register we asked for. Returns the float or None."""
+    mb = bytes([0x01, 0x03]) + struct.pack('>HH', reg, 2)
+    s.sendall(build_frame(0x05, mb, seq=seq))
+    r = parse_agn8(recv_agn8_frame(s))
+    if r and r['cmd'] == 0x05 and r['crc_ok']:
+        p = r['payload']
+        if len(p) >= 9 and p[0] == 0x01 and p[1] == 0x03 and p[2:4] == struct.pack('>H', reg):
+            return struct.unpack('>f', p[5:9])[0]
+    return None
+
+def write_register(s: socket.socket, reg: int, value: float, seq: int = 0x7001) -> bool:
+    """Write a 32-bit float to one register. The device uses CMD=0x06 (reads use
+    0x05) and a non-standard Modbus payload that omits the register-count field:
+        [addr=01][fc=0x10][reg_hi][reg_lo][n_bytes=04][float BE]
+    On success it echoes a standard write-ack ([01][10][reg][00 02]); on refusal
+    it returns an exception frame ([01][90][code]). Returns True if accepted."""
+    data = bytes([0x01, 0x10]) + struct.pack('>H', reg) + bytes([0x04]) + struct.pack('>f', value)
+    s.sendall(build_frame(0x06, data, seq=seq))
+    r = parse_agn8(recv_agn8_frame(s))
+    return bool(r and r['cmd'] == 0x06 and r['crc_ok']
+                and len(r['payload']) >= 2 and not (r['payload'][1] & 0x80))
+
+def _parse_value(value, kind: str):
+    """Convert a CLI value into the float the register stores, or None if bad.
+    hhmm accepts either HH:MM or a plain HHMM number."""
+    v = str(value).strip()
+    if kind == "hhmm":
+        try:
+            if ":" in v:
+                hh, mm = (int(x) for x in v.split(":", 1))
+            else:
+                hh, mm = divmod(int(float(v)), 100)
+        except ValueError:
+            return None
+        return float(hh * 100 + mm) if 0 <= hh <= 23 and 0 <= mm <= 59 else None
+    try:
+        return float(v)
+    except ValueError:
+        return None
+
+def set_setting(field: str, value, device_ip: str, bind_ip: str = "") -> dict:
+    """Validate, clamp, write, and read back one setting. Returns a result dict;
+    'ok' is True only if every register acked and read back to the target."""
+    if field not in WRITABLE:
+        return {"field": field, "ok": False, "error": f"unknown setting; allowed: {', '.join(WRITABLE)}"}
+    regs, lo, hi, kind = WRITABLE[field]
+    fval = _parse_value(value, kind)
+    if fval is None:
+        return {"field": field, "ok": False, "error": f"invalid {kind} value: {value!r}"}
+    if not (lo <= fval <= hi):
+        return {"field": field, "ok": False, "error": f"out of range [{lo}, {hi}]: {fval}"}
+    results = []
+    with _connect(device_ip, bind_ip) as s:
+        for i, reg in enumerate(regs):
+            acked = write_register(s, reg, fval, seq=0x7001 + i)
+            back  = read_register(s, reg, seq=0x7010 + i)
+            results.append((reg, acked, back))
+    ok = all(a and b is not None and abs(b - fval) < 1e-3 for _, a, b in results)
+    return {
+        "field": field, "value": fval, "ok": ok,
+        "registers": [{"reg": f"0x{r:04x}", "acked": a, "readback": b} for r, a, b in results],
+    }
+
+
 # ── Home Assistant MQTT ──────────────────────────────────────────────────────
 
 def ha_publish_discovery(client):
@@ -274,6 +369,8 @@ def main():
     parser.add_argument('--iface',       default=os.environ.get('IFACE', ''),              metavar='IFACE', help='Network interface to bind (e.g. wlp61s0); enables auto-discovery [env: IFACE]')
     parser.add_argument('--loop',        type=int, default=int(os.environ.get('POLL_INTERVAL', 0)), metavar='SECONDS', help='Poll interval in seconds, 0 = run once [env: POLL_INTERVAL]')
     parser.add_argument('--raw',         action='store_true')
+    parser.add_argument('--set',         action='append', default=[], metavar='FIELD=VALUE',
+                        help='Write a setting then exit (repeatable). Fields: ' + ', '.join(WRITABLE))
     parser.add_argument('--mqtt',        action='store_true',  default=bool(os.environ.get('MQTT')), help='Publish to MQTT broker [env: MQTT=1]')
     parser.add_argument('--mqtt-broker', default=os.environ.get('MQTT_BROKER', 'localhost'), metavar='HOST', help='[env: MQTT_BROKER]')
     parser.add_argument('--mqtt-port',   type=int, default=int(os.environ.get('MQTT_PORT', 1883)), metavar='PORT', help='[env: MQTT_PORT]')
@@ -292,6 +389,19 @@ def main():
         if not bind_ip:
             bind_ip = discovered_bind
         print(f"Discovered device at {device_ip}", flush=True)
+
+    if args.set:
+        ok = True
+        for item in args.set:
+            if "=" not in item:
+                print(json.dumps({"error": f"expected FIELD=VALUE, got {item!r}"}))
+                ok = False
+                continue
+            field, _, value = item.partition("=")
+            result = set_setting(field.strip(), value, device_ip, bind_ip)
+            print(json.dumps(result, indent=2))
+            ok = ok and result.get("ok", False)
+        raise SystemExit(0 if ok else 1)
 
     mqtt_client = None
     if args.mqtt:
