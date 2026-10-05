@@ -244,6 +244,44 @@ Register data is **32-bit IEEE 754 big-endian floats** (two consecutive 16-bit M
 
 Register map confirmed by simultaneous comparison with the Mango Power app. Energy balance error < 1%.
 
+### Settings registers (read-only so far)
+
+Identified by snapshotting all readable registers, changing one setting in the Mango Power app, and diffing. Each change below touched only the listed register(s). All values are **32-bit IEEE 754 big-endian floats** (two registers each), readable with `fc=03` (`fc=04` returns the same map).
+
+| Register | Setting | Format | Notes |
+|----------|---------|--------|-------|
+| `0x314a` | Reserve SOC | % | e.g. `41b00000` = 22.0 |
+| `0xc014` | TOU window 1 — charge start time | `HH*100 + MM`, device local time | e.g. 902.0 = 09:02 |
+| `0xc016` | TOU window 1 — charge end time | `HH*100 + MM`, device local time | e.g. 1300.0 = 13:00 |
+| `0xc05a` | TOU window 1 — charge power | kW | Mirrored at `0xc0ba`; both change together |
+| `0xc0ba` | TOU window 1 — charge power (copy) | kW | Purpose of the second copy unknown |
+
+> **Note:** the device accepts a charge power above the inverter's limit (e.g. 6 kW on a 5 kW unit) and simply charges at the hardware maximum. Clamp on the client side.
+
+### Address space overview
+
+A coarse `fc=03` sweep of `0x0000–0xffff` (step `0x100`) found these blocks; everything else returns Modbus exception `01 83 03`.
+
+| Block | Contents |
+|-------|----------|
+| `0x1000–0x12xx` | Live telemetry (see register map above) |
+| `0x2000–0x200c` | Integer values (1665, 2016, 600, 1936, …) — likely firmware/version info; did not change with any setting tested |
+| `0x3000–0x320c` | Settings / protection parameter table (battery voltage limits 42–58 V, grid 230–240 V, SOC/temperature thresholds, reserve SOC at `0x314a`) |
+| `0x3c00–0x3caa` | Values clustered around 1.0 — almost certainly factory calibration factors. **Do not write.** |
+| `0xa000–0xa3xx`, `0xb000–0xb3xx` | Live per-phase/per-unit telemetry and energy counters |
+| `0xc000–0xc0ff` | Time-of-use schedule (see settings table above); `0xc060–0xc066` = `ffffffff` (empty slots), `0xc0b4` = `0x7f` (possibly a weekday mask) |
+| `0xc100–0xc3xx` | Live telemetry |
+
+### Writing settings (work in progress)
+
+Local writes are **not working yet**. Findings so far:
+
+- A standard Modbus `fc=0x10` (write multiple registers) request relayed through CMD=5 is recognised by the controller — it answers with exception `0x90` rather than `illegal function`.
+- Writing an unmapped address (`0x0000`) returns `01 90 03`, as expected.
+- Writing the *current* value back to reserve SOC (`01 10 31 4a 00 02 04 41 b0 00 00`) is also rejected with `01 90 03`, and the register is unchanged.
+
+So the controller rejects the standard request layout. Likely causes: a non-standard write payload (reads already use one — see the register-address echo above), a different target address or function code for writes, or an unlock step. The next step is to capture the write the cloud sends when a setting is changed in the app and replay that format locally.
+
 ---
 
 ## Contributing
@@ -251,6 +289,7 @@ Register map confirmed by simultaneous comparison with the Mango Power app. Ener
 Issues and PRs welcome — especially:
 - Confirmed register mappings for other Mango Power models
 - Additional cumulative energy registers (0x1230–0x1262 range, likely kWh totals)
+- The write frame format the cloud uses for settings (see [Writing settings](#writing-settings-work-in-progress))
 - Docker / Home Assistant add-on packaging
 
 ---
