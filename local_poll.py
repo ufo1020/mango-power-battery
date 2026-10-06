@@ -332,6 +332,65 @@ def set_setting(field: str, value, device_ip: str, bind_ip: str = "") -> dict:
     }
 
 
+# ── Daylight saving for charge times ─────────────────────────────────────────
+#
+# The inverter clock is fixed at a UTC offset with no DST (the app only offers
+# fixed offsets). A charge window is one recurring HH:MM, so no single stored
+# value is correct in both halves of the year: while DST is in effect the local
+# wall clock runs ahead of the inverter, and the window would fire late.
+#
+# We keep the user's intent in *wall-clock* time and translate it to what the
+# inverter must store for the current date's DST state. This only changes at the
+# two yearly transitions, so a systemd timer runs the reconcile at those dates
+# (see systemd/mango-charge-tz.*); the reconcile is idempotent.
+
+INVERTER_UTC_OFFSET_H = int(os.environ.get("INVERTER_UTC_OFFSET_H", 10))  # device clock, no DST
+LOCAL_TZ = os.environ.get("LOCAL_TZ", "Australia/Melbourne")
+
+# field -> env var holding the desired wall-clock time
+CHARGE_WALL_ENV = {"charge_start": "CHARGE_START_WALL", "charge_end": "CHARGE_END_WALL"}
+
+def wall_to_inverter_hhmm(wall_hhmm: float, when=None, tz_name: str = None) -> int:
+    """Translate a wall-clock time (HHMM) in the DST-aware local zone into the
+    HHMM the inverter must store, whose clock is fixed at UTC+INVERTER_UTC_OFFSET_H.
+    Subtracts the DST delta (e.g. 60 min while AEDT is in effect, 0 under AEST).
+    The subtraction wraps modulo 24h."""
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+    tz = ZoneInfo(tz_name or LOCAL_TZ)
+    hh, mm = divmod(int(round(wall_hhmm)), 100)
+    day = when or datetime.now(tz).date()
+    local = datetime(day.year, day.month, day.day, hh, mm, tzinfo=tz)
+    delta_min = int((local.utcoffset() - timedelta(hours=INVERTER_UTC_OFFSET_H)).total_seconds() // 60)
+    total = (hh * 60 + mm - delta_min) % (24 * 60)
+    return (total // 60) * 100 + (total % 60)
+
+def sync_charge_window(device_ip: str, bind_ip: str = "", tz_name: str = None) -> list:
+    """Reconcile the charge start/end registers from wall-clock config
+    (CHARGE_START_WALL / CHARGE_END_WALL) for today's DST state. Idempotent:
+    only writes a register that differs from its target."""
+    out = []
+    for field, env in CHARGE_WALL_ENV.items():
+        wall = os.environ.get(env)
+        if not wall:
+            continue
+        parsed = _parse_value(wall, "hhmm")
+        if parsed is None:
+            out.append({"field": field, "ok": False, "error": f"invalid {env}: {wall!r}"})
+            continue
+        target = wall_to_inverter_hhmm(parsed, tz_name=tz_name)
+        reg0 = WRITABLE[field][0][0]
+        with _connect(device_ip, bind_ip) as s:
+            current = read_register(s, reg0)
+        if current is not None and abs(current - target) < 1e-3:
+            out.append({"field": field, "wall": wall, "inverter_hhmm": target, "changed": False, "ok": True})
+            continue
+        res = set_setting(field, target, device_ip, bind_ip)
+        res.update({"wall": wall, "inverter_hhmm": target, "changed": True})
+        out.append(res)
+    return out
+
+
 # ── Home Assistant MQTT ──────────────────────────────────────────────────────
 
 def ha_publish_discovery(client):
@@ -371,6 +430,9 @@ def main():
     parser.add_argument('--raw',         action='store_true')
     parser.add_argument('--set',         action='append', default=[], metavar='FIELD=VALUE',
                         help='Write a setting then exit (repeatable). Fields: ' + ', '.join(WRITABLE))
+    parser.add_argument('--sync-charge-window', action='store_true',
+                        help='Rewrite charge start/end for the current DST state from '
+                             'CHARGE_START_WALL/CHARGE_END_WALL (wall-clock, zone LOCAL_TZ), then exit')
     parser.add_argument('--mqtt',        action='store_true',  default=bool(os.environ.get('MQTT')), help='Publish to MQTT broker [env: MQTT=1]')
     parser.add_argument('--mqtt-broker', default=os.environ.get('MQTT_BROKER', 'localhost'), metavar='HOST', help='[env: MQTT_BROKER]')
     parser.add_argument('--mqtt-port',   type=int, default=int(os.environ.get('MQTT_PORT', 1883)), metavar='PORT', help='[env: MQTT_PORT]')
@@ -402,6 +464,13 @@ def main():
             print(json.dumps(result, indent=2))
             ok = ok and result.get("ok", False)
         raise SystemExit(0 if ok else 1)
+
+    if args.sync_charge_window:
+        results = sync_charge_window(device_ip, bind_ip)
+        print(json.dumps(results, indent=2))
+        if not results:
+            print("No CHARGE_START_WALL / CHARGE_END_WALL configured", flush=True)
+        raise SystemExit(0 if all(r.get("ok") for r in results) else 1)
 
     mqtt_client = None
     if args.mqtt:

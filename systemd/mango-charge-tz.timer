@@ -1,0 +1,16 @@
+[Unit]
+Description=Run the charge-window DST reconcile at the two yearly transitions
+
+[Timer]
+# Australia DST flips on the first Sunday of April and October. Run a little
+# after the 02:00/03:00 switch so the new offset is already in effect. The
+# reconcile is idempotent, so the exact minute does not matter.
+OnCalendar=Sun *-04-01..07 04:00:00
+OnCalendar=Sun *-10-01..07 04:00:00
+# Also reconcile shortly after boot, in case the machine was off at a transition.
+OnBootSec=3min
+# Catch up a transition that was missed while powered off.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

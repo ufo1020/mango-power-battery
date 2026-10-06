@@ -1,0 +1,10 @@
+[Unit]
+Description=Mango Power M — reconcile charge window for daylight saving
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/mango-power.env
+ExecStart=/usr/bin/python3 /opt/mango-power-battery/local_poll.py --sync-charge-window
+User=USER
