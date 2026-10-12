@@ -164,7 +164,25 @@ No manual YAML configuration needed in Home Assistant.
 |-------|---------|
 | `mango_power/m/state` | JSON state payload |
 | `mango_power/m/availability` | `online` / `offline` (retained) |
-| `homeassistant/sensor/mango_m_<field>/config` | Auto-discovery configs (retained) |
+| `homeassistant/sensor/mango_m_<field>/config` | Sensor auto-discovery configs (retained) |
+| `homeassistant/{number,text}/mango_m_<field>/config` | Control auto-discovery configs (retained) |
+| `mango_power/m/setting/<field>` | Current value of a writable setting (retained) |
+| `mango_power/m/set/<field>` | Command topic — HA writes here to change a setting |
+
+### Writable controls
+
+In `--mqtt` mode the poller also publishes discovery for the [writable settings](#writing-settings) as **controllable** entities, so you can change them straight from the Home Assistant dashboard — no YAML:
+
+| Entity | Type | Range |
+|--------|------|-------|
+| Reserve SOC | number | 1–100 % |
+| Charge Power | number | 0–5 kW |
+| Charge Start | text | `HH:MM` |
+| Charge End | text | `HH:MM` |
+
+When you change one in HA, the poller validates and clamps it (reusing the `--set` allowlist), writes it to the device, reads it back, and republishes the confirmed value to `mango_power/m/setting/<field>`. Device access is serialized with polling, so a dashboard change never collides with a poll. The current values are also refreshed on every poll, so the controls track changes made elsewhere (e.g. in the vendor app).
+
+> Charge times in HA are **wall-clock** (`LOCAL_TZ`, DST-aware) and are converted to the inverter's fixed-offset clock on write. The registers don't move at a DST transition, so the displayed times shift by an hour then unless you re-enter them or run the [DST reconcile](#daylight-saving-for-charge-times).
 
 ---
 
