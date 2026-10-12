@@ -382,29 +382,75 @@ LOCAL_TZ = os.environ.get("LOCAL_TZ", "Australia/Melbourne")
 # field -> env var holding the desired wall-clock time
 CHARGE_WALL_ENV = {"charge_start": "CHARGE_START_WALL", "charge_end": "CHARGE_END_WALL"}
 
+def _dst_delta_min(now=None, tz_name: str = None) -> int:
+    """Minutes the local wall clock is ahead of the inverter clock at `now`
+    (e.g. 60 while AEDT is in effect, 0 under AEST)."""
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+    now = now or datetime.now(ZoneInfo(tz_name or LOCAL_TZ))
+    return int((now.utcoffset() - timedelta(hours=INVERTER_UTC_OFFSET_H)).total_seconds() // 60)
+
 def wall_to_inverter_hhmm(wall_hhmm: float, when=None, tz_name: str = None) -> int:
     """Translate a wall-clock time (HHMM) in the DST-aware local zone into the
     HHMM the inverter must store, whose clock is fixed at UTC+INVERTER_UTC_OFFSET_H.
-    Subtracts the DST delta (e.g. 60 min while AEDT is in effect, 0 under AEST).
-    The subtraction wraps modulo 24h."""
-    from datetime import datetime, timedelta
-    from zoneinfo import ZoneInfo
-    tz = ZoneInfo(tz_name or LOCAL_TZ)
+    Uses the DST delta in effect at `when` (an aware datetime, default now) for
+    every time of day: the window fires daily, so the offset that applies until
+    the next transition is what matters. Wraps modulo 24h."""
     hh, mm = divmod(int(round(wall_hhmm)), 100)
-    day = when or datetime.now(tz).date()
-    local = datetime(day.year, day.month, day.day, hh, mm, tzinfo=tz)
-    delta_min = int((local.utcoffset() - timedelta(hours=INVERTER_UTC_OFFSET_H)).total_seconds() // 60)
-    total = (hh * 60 + mm - delta_min) % (24 * 60)
+    total = (hh * 60 + mm - _dst_delta_min(when, tz_name)) % (24 * 60)
     return (total // 60) * 100 + (total % 60)
 
 def inverter_to_wall_hhmm(inv_hhmm: float, when=None, tz_name: str = None) -> int:
-    """Inverse of wall_to_inverter_hhmm: the wall-clock HHMM at which an
-    inverter-clock HHMM fires on the given (default: today's) date."""
-    for h in range(24):
-        for m in range(60):
-            if wall_to_inverter_hhmm(h * 100 + m, when, tz_name) == int(round(inv_hhmm)):
-                return h * 100 + m
-    return int(round(inv_hhmm))
+    """Inverse of wall_to_inverter_hhmm."""
+    hh, mm = divmod(int(round(inv_hhmm)), 100)
+    total = (hh * 60 + mm + _dst_delta_min(when, tz_name)) % (24 * 60)
+    return (total // 60) * 100 + (total % 60)
+
+CHARGE_WALL_STATE = os.path.join(os.environ.get("STATE_DIRECTORY") or os.path.dirname(os.path.abspath(__file__)),
+                                 "charge_wall.json")
+
+def keep_charge_wall_time(raw: dict, device_ip: str, bind_ip: str = "", now=None,
+                          state_path: str = None) -> list:
+    """Keep the charge window at the same wall-clock time across DST changes.
+
+    Remembers the wall-clock start/end last seen (whatever set them: HA, the app,
+    --set) together with the DST delta in effect. When the delta changes, rewrites
+    the inverter registers so the window keeps its wall-clock time. Called every
+    poll with the raw register values; idempotent and restart-safe via a small
+    state file. Returns the set_setting results of any writes made."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    if not all(f in raw for f in CHARGE_WALL_ENV):
+        return []                   # partial read: don't act on or overwrite state
+    path = state_path or CHARGE_WALL_STATE
+    now = now or datetime.now(ZoneInfo(LOCAL_TZ))
+    delta = _dst_delta_min(now)
+    try:
+        with open(path) as f:
+            saved = json.load(f)
+    except (OSError, ValueError):
+        saved = None
+    results = []
+    if saved and saved.get("dst_delta_min") != delta:
+        for field, wall in saved.get("wall", {}).items():
+            target = wall_to_inverter_hhmm(wall, when=now)
+            if field in raw and abs(raw[field] - target) > 1e-3:
+                res = set_setting(field, target, device_ip, bind_ip)
+                res.update({"wall": wall, "dst_delta_min": delta})
+                print(json.dumps({"dst_reconcile": res}), flush=True)
+                results.append(res)
+                if res.get("ok"):
+                    raw[field] = float(target)
+        if any(not r.get("ok") for r in results):
+            return results          # keep old state so the next poll retries
+    state = {"dst_delta_min": delta,
+             "wall": {f: inverter_to_wall_hhmm(raw[f], when=now) for f in CHARGE_WALL_ENV}}
+    if state != saved:
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(state, f)
+        os.replace(tmp, path)
+    return results
 
 def sync_charge_window(device_ip: str, bind_ip: str = "", tz_name: str = None) -> list:
     """Reconcile the charge start/end registers from wall-clock config
@@ -495,15 +541,18 @@ def ha_publish_control_discovery(client):
         topic = f"{DISCOVERY_PREFIX}/{component}/{uid}/config"
         client.publish(topic, json.dumps(config), retain=True)
 
-def read_settings(device_ip: str, bind_ip: str = "") -> dict:
+def read_settings(device_ip: str, bind_ip: str = "", raw_out: dict = None) -> dict:
     """Read the current value of each writable setting from the device, formatted
-    for its HA state topic (times as HH:MM, others numeric)."""
+    for its HA state topic (times as HH:MM, others numeric). If raw_out is given,
+    it is filled with the unconverted register values."""
     vals = {}
     with _connect(device_ip, bind_ip) as s:
         for field, (regs, lo, hi, kind) in WRITABLE.items():
             v = read_register(s, regs[0])
             if v is None:
                 continue
+            if raw_out is not None:
+                raw_out[field] = v
             if kind == "hhmm":   # HA shows wall-clock time, device stores inverter clock
                 hh, mm = divmod(inverter_to_wall_hhmm(v), 100)
                 vals[field] = f"{hh:02d}:{mm:02d}"
@@ -623,7 +672,10 @@ def main():
             if mqtt_client:
                 mqtt_client.publish(STATE_TOPIC, json.dumps(data))
                 with device_lock:
-                    settings = read_settings(device_ip, bind_ip)
+                    raw = {}
+                    settings = read_settings(device_ip, bind_ip, raw)
+                    if keep_charge_wall_time(raw, device_ip, bind_ip):
+                        settings = read_settings(device_ip, bind_ip)
                 ha_publish_settings_state(mqtt_client, settings)
         except Exception as e:
             data = {'error': str(e), 'timestamp': time.strftime('%Y-%m-%dT%H:%M:%S')}
