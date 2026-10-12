@@ -18,7 +18,7 @@ Usage:
   python3 local_poll.py --iface wlp61s0 --loop 30 --mqtt        # loop with auto-discovery + MQTT
 """
 
-import os, socket, struct, time, json, argparse, math, fcntl, ipaddress
+import os, socket, struct, time, json, argparse, math, fcntl, ipaddress, threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 DEVICE_PORT    = 8888
@@ -69,6 +69,23 @@ HA_DEVICE = {
 
 STATE_TOPIC      = "mango_power/m/state"
 DISCOVERY_PREFIX = "homeassistant"
+
+# Writable settings exposed as controllable HA entities (number / text).
+# field must be a key of WRITABLE; HA writes to SET_TOPIC_BASE/<field>, and we
+# publish the device's current value back to SETTING_STATE_BASE/<field>.
+#   (field, component, friendly_name, extra discovery config)
+HA_CONTROLS = [
+    ("reserve_soc",     "number", "Reserve SOC",
+     {"min": 1, "max": 100, "step": 1, "unit_of_measurement": "%", "mode": "box"}),
+    ("charge_power_kw", "number", "Charge Power",
+     {"min": 0, "max": 5, "step": 0.1, "unit_of_measurement": "kW", "mode": "box"}),
+    ("charge_start",    "text",   "Charge Start",
+     {"min": 5, "max": 5, "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$"}),
+    ("charge_end",      "text",   "Charge End",
+     {"min": 5, "max": 5, "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$"}),
+]
+SET_TOPIC_BASE     = "mango_power/m/set"       # HA -> poller (command)
+SETTING_STATE_BASE = "mango_power/m/setting"   # poller -> HA (current value)
 
 # Writable settings — see write_register() for the (non-standard) frame format.
 # Each value is clamped to [lo, hi] and read back to confirm before we report
@@ -410,6 +427,55 @@ def ha_publish_discovery(client):
         topic = f"{DISCOVERY_PREFIX}/sensor/{uid}/config"
         client.publish(topic, json.dumps(config), retain=True)
 
+def ha_publish_control_discovery(client):
+    """Publish MQTT discovery for the writable settings as number/text entities."""
+    for field, component, name, extra in HA_CONTROLS:
+        uid = f"mango_m_{field}"
+        config = {
+            "name": name,
+            "unique_id": uid,
+            "command_topic": f"{SET_TOPIC_BASE}/{field}",
+            "state_topic": f"{SETTING_STATE_BASE}/{field}",
+            "device": HA_DEVICE,
+            "availability_topic": "mango_power/m/availability",
+            **extra,
+        }
+        topic = f"{DISCOVERY_PREFIX}/{component}/{uid}/config"
+        client.publish(topic, json.dumps(config), retain=True)
+
+def read_settings(device_ip: str, bind_ip: str = "") -> dict:
+    """Read the current value of each writable setting from the device, formatted
+    for its HA state topic (times as HH:MM, others numeric)."""
+    vals = {}
+    with _connect(device_ip, bind_ip) as s:
+        for field, (regs, lo, hi, kind) in WRITABLE.items():
+            v = read_register(s, regs[0])
+            if v is None:
+                continue
+            if kind == "hhmm":
+                hh, mm = divmod(int(round(v)), 100)
+                vals[field] = f"{hh:02d}:{mm:02d}"
+            else:
+                vals[field] = round(v, 1)
+    return vals
+
+def ha_publish_settings_state(client, values: dict):
+    for field, val in values.items():
+        client.publish(f"{SETTING_STATE_BASE}/{field}", val, retain=True)
+
+def _on_set_message(client, userdata, msg):
+    """Handle an HA command: write the setting, then publish the device's
+    confirmed value back. Serialized against polling via a shared lock."""
+    field = msg.topic.rsplit("/", 1)[-1]
+    value = msg.payload.decode(errors="replace").strip()
+    with userdata["lock"]:
+        result = set_setting(field, value, userdata["device_ip"], userdata["bind_ip"])
+        print(json.dumps({"set_via_mqtt": result}), flush=True)
+        try:
+            ha_publish_settings_state(client, read_settings(userdata["device_ip"], userdata["bind_ip"]))
+        except OSError as e:
+            print(json.dumps({"settings_read_error": str(e)}), flush=True)
+
 def mqtt_connect(broker: str, port: int, user: str = None, password: str = None):
     import paho.mqtt.client as mqtt
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="mango-power-m-poller")
@@ -472,20 +538,34 @@ def main():
             print("No CHARGE_START_WALL / CHARGE_END_WALL configured", flush=True)
         raise SystemExit(0 if all(r.get("ok") for r in results) else 1)
 
+    device_lock = threading.Lock()   # serialize device access between poll loop and HA writes
     mqtt_client = None
     if args.mqtt:
         mqtt_client = mqtt_connect(args.mqtt_broker, args.mqtt_port,
                                    args.mqtt_user, args.mqtt_pass)
         ha_publish_discovery(mqtt_client)
+        ha_publish_control_discovery(mqtt_client)
+        mqtt_client.user_data_set({"device_ip": device_ip, "bind_ip": bind_ip, "lock": device_lock})
+        mqtt_client.on_message = _on_set_message
+        mqtt_client.subscribe(f"{SET_TOPIC_BASE}/+")
         mqtt_client.publish("mango_power/m/availability", "online", retain=True)
+        try:
+            with device_lock:
+                ha_publish_settings_state(mqtt_client, read_settings(device_ip, bind_ip))
+        except OSError as e:
+            print(json.dumps({"settings_read_error": str(e)}), flush=True)
         print(f"MQTT connected to {args.mqtt_broker}:{args.mqtt_port}, discovery published")
 
     while True:
         try:
-            data = poll(include_raw=args.raw, device_ip=device_ip, bind_ip=bind_ip)
+            with device_lock:
+                data = poll(include_raw=args.raw, device_ip=device_ip, bind_ip=bind_ip)
             print(json.dumps(data, indent=2))
             if mqtt_client:
                 mqtt_client.publish(STATE_TOPIC, json.dumps(data))
+                with device_lock:
+                    settings = read_settings(device_ip, bind_ip)
+                ha_publish_settings_state(mqtt_client, settings)
         except Exception as e:
             data = {'error': str(e), 'timestamp': time.strftime('%Y-%m-%dT%H:%M:%S')}
             print(json.dumps(data, indent=2))
@@ -499,6 +579,8 @@ def main():
                     device_ip = new_ip
                     if not args.iface:
                         bind_ip = new_bind
+            if mqtt_client:   # keep the HA command handler pointed at the current IP
+                mqtt_client.user_data_set({"device_ip": device_ip, "bind_ip": bind_ip, "lock": device_lock})
 
         if not args.loop:
             break
