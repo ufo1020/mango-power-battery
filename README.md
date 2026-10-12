@@ -352,7 +352,11 @@ python3 local_poll.py --sync-charge-window
 
 This converts each wall-clock time to what the inverter must store for today's DST state (e.g. under AEDT, `09:00` → register `08:00`), and writes **only** the registers that differ.
 
-The offset only changes at the two yearly DST transitions, so run this after each one (it is idempotent, so running it more often is harmless). Automating it on a timer is left to the user for now.
+The offset only changes at the two yearly DST transitions, so run this after each one (it is idempotent, so running it more often is harmless).
+
+#### Automatic (poller in `--mqtt` loop mode)
+
+The long-running poller handles DST by itself, without any `CHARGE_*_WALL` config. On every poll it records the charge window's current **wall-clock** times, whichever way they were set (HA, the vendor app, `--set`), together with the DST offset in effect. When the offset changes, it rewrites the inverter registers so the window keeps the same wall-clock time. The fix lands within one poll interval of the changeover, or at the next start if the poller was down. State is kept in `charge_wall.json` under `$STATE_DIRECTORY` (set by `StateDirectory=mango-power` in the systemd unit → `/var/lib/mango-power`), falling back to the script's directory. Use either this or the env-based reconcile, not both.
 
 Requires Python 3.9+ with `tzdata` available (standard on most Linux distros).
 

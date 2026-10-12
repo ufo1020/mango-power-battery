@@ -5,6 +5,7 @@ Wants=network-online.target
 
 [Service]
 EnvironmentFile=/etc/mango-power.env
+StateDirectory=mango-power
 ExecStart=/usr/bin/python3 /opt/mango-power-battery/local_poll.py
 Restart=on-failure
 RestartSec=10
