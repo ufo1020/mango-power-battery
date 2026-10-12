@@ -313,6 +313,31 @@ python3 local_poll.py --set charge_start=01:00 --set charge_end=05:00 --set char
 
 Each value is range-checked, written, and read back; the command exits non-zero if any register fails to confirm. Discharge-side settings are intentionally not writable.
 
+### Daylight saving for charge times
+
+The inverter clock is a **fixed UTC offset with no DST** (the app only offers fixed offsets). A charge window is a single recurring `HH:MM`, so no stored value is correct all year: while DST is in effect the local wall clock runs ahead of the inverter and the window fires late.
+
+The fix keeps your charge times in **wall-clock** terms and rewrites the registers at each DST transition. Set these in `/etc/mango-power.env`:
+
+```bash
+LOCAL_TZ=Australia/Melbourne   # any IANA zone; default Australia/Melbourne
+INVERTER_UTC_OFFSET_H=10       # the fixed offset configured in the app
+CHARGE_START_WALL=09:00        # desired wall-clock charge start
+CHARGE_END_WALL=13:00          # desired wall-clock charge end
+```
+
+Then reconcile on demand:
+
+```bash
+python3 local_poll.py --sync-charge-window
+```
+
+This converts each wall-clock time to what the inverter must store for today's DST state (e.g. under AEDT, `09:00` → register `08:00`), and writes **only** the registers that differ.
+
+The offset only changes at the two yearly DST transitions, so run this after each one (it is idempotent, so running it more often is harmless). Automating it on a timer is left to the user for now.
+
+Requires Python 3.9+ with `tzdata` available (standard on most Linux distros).
+
 ---
 
 ## Contributing
