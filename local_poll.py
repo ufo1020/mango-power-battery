@@ -98,6 +98,21 @@ WRITABLE = {
     "charge_end":      ((0xc016,),         0.0, 2359.0, "hhmm"),
 }
 
+# Noise rejection: the device occasionally returns a single bogus sample
+# (most often SOC momentarily reading 0 while the pack is near full). These
+# show up either as physically impossible values or as impossibly fast jumps
+# between consecutive polls. For each field below we reject such samples and
+# hold the last good value so the spike never reaches Home Assistant.
+#   field: (min, max, max_slew_per_sec)   slew=None disables the rate check
+SANITY = {
+    "batt_soc_pct":   (1.0,   100.0, 0.2),    # 0% is the classic glitch; SOC can't move >0.2%/s
+    "batt_voltage_v": (30.0,  70.0,  None),
+    "batt_temp_c":    (-20.0, 80.0,  1.0),
+    "inv_temp_c":     (-20.0, 100.0, 1.0),
+    "grid_voltage_v": (150.0, 300.0, None),
+    "grid_freq_hz":   (45.0,  65.0,  None),
+}
+
 
 # ── Network helpers ───────────────────────────────────────────────────────────
 
@@ -382,6 +397,15 @@ def wall_to_inverter_hhmm(wall_hhmm: float, when=None, tz_name: str = None) -> i
     total = (hh * 60 + mm - delta_min) % (24 * 60)
     return (total // 60) * 100 + (total % 60)
 
+def inverter_to_wall_hhmm(inv_hhmm: float, when=None, tz_name: str = None) -> int:
+    """Inverse of wall_to_inverter_hhmm: the wall-clock HHMM at which an
+    inverter-clock HHMM fires on the given (default: today's) date."""
+    for h in range(24):
+        for m in range(60):
+            if wall_to_inverter_hhmm(h * 100 + m, when, tz_name) == int(round(inv_hhmm)):
+                return h * 100 + m
+    return int(round(inv_hhmm))
+
 def sync_charge_window(device_ip: str, bind_ip: str = "", tz_name: str = None) -> list:
     """Reconcile the charge start/end registers from wall-clock config
     (CHARGE_START_WALL / CHARGE_END_WALL) for today's DST state. Idempotent:
@@ -406,6 +430,34 @@ def sync_charge_window(device_ip: str, bind_ip: str = "", tz_name: str = None) -
         res.update({"wall": wall, "inverter_hhmm": target, "changed": True})
         out.append(res)
     return out
+
+
+# ── Noise rejection ──────────────────────────────────────────────────────────
+
+def reject_noise(result: dict, state: dict) -> dict:
+    """Drop physically impossible samples in-place, holding the last good
+    value. A reading outside [min, max] is always rejected. A reading that
+    slews faster than max_slew_per_sec is held until a second poll confirms
+    it, so a genuine step change is accepted while one-off spikes are not."""
+    now = time.time()
+    for field, (lo, hi, slew) in SANITY.items():
+        val = result.get(field)
+        if val is None:
+            continue
+        good = state.get(field)            # (value, ts) of last accepted reading
+        if val < lo or val > hi:
+            result[field] = good[0] if good is not None else None
+            continue
+        if good is not None and slew is not None and \
+                abs(val - good[0]) > slew * max(now - good[1], 1e-3):
+            pend = state.get(field + "#pend")
+            if pend is None or abs(val - pend) > max(0.5, abs(pend) * 0.05):
+                state[field + "#pend"] = val   # remember candidate, wait for confirmation
+                result[field] = good[0]        # hold last good for now
+                continue
+        state.pop(field + "#pend", None)
+        state[field] = (val, now)
+    return result
 
 
 # ── Home Assistant MQTT ──────────────────────────────────────────────────────
@@ -452,8 +504,8 @@ def read_settings(device_ip: str, bind_ip: str = "") -> dict:
             v = read_register(s, regs[0])
             if v is None:
                 continue
-            if kind == "hhmm":
-                hh, mm = divmod(int(round(v)), 100)
+            if kind == "hhmm":   # HA shows wall-clock time, device stores inverter clock
+                hh, mm = divmod(inverter_to_wall_hhmm(v), 100)
                 vals[field] = f"{hh:02d}:{mm:02d}"
             else:
                 vals[field] = round(v, 1)
@@ -468,6 +520,10 @@ def _on_set_message(client, userdata, msg):
     confirmed value back. Serialized against polling via a shared lock."""
     field = msg.topic.rsplit("/", 1)[-1]
     value = msg.payload.decode(errors="replace").strip()
+    if field in WRITABLE and WRITABLE[field][3] == "hhmm":
+        wall = _parse_value(value, "hhmm")
+        if wall is not None:
+            value = wall_to_inverter_hhmm(wall)
     with userdata["lock"]:
         result = set_setting(field, value, userdata["device_ip"], userdata["bind_ip"])
         print(json.dumps({"set_via_mqtt": result}), flush=True)
@@ -481,6 +537,8 @@ def mqtt_connect(broker: str, port: int, user: str = None, password: str = None)
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="mango-power-m-poller")
     if user:
         client.username_pw_set(user, password)
+    # Subscribe in on_connect so the command subscription survives broker reconnects.
+    client.on_connect = lambda c, *_: c.subscribe(f"{SET_TOPIC_BASE}/+")
     client.connect(broker, port, keepalive=60)
     client.loop_start()
     return client
@@ -547,7 +605,6 @@ def main():
         ha_publish_control_discovery(mqtt_client)
         mqtt_client.user_data_set({"device_ip": device_ip, "bind_ip": bind_ip, "lock": device_lock})
         mqtt_client.on_message = _on_set_message
-        mqtt_client.subscribe(f"{SET_TOPIC_BASE}/+")
         mqtt_client.publish("mango_power/m/availability", "online", retain=True)
         try:
             with device_lock:
@@ -556,10 +613,12 @@ def main():
             print(json.dumps({"settings_read_error": str(e)}), flush=True)
         print(f"MQTT connected to {args.mqtt_broker}:{args.mqtt_port}, discovery published")
 
+    noise_state = {}
     while True:
         try:
             with device_lock:
                 data = poll(include_raw=args.raw, device_ip=device_ip, bind_ip=bind_ip)
+            reject_noise(data, noise_state)
             print(json.dumps(data, indent=2))
             if mqtt_client:
                 mqtt_client.publish(STATE_TOPIC, json.dumps(data))

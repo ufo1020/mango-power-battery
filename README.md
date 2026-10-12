@@ -182,7 +182,7 @@ In `--mqtt` mode the poller also publishes discovery for the [writable settings]
 
 When you change one in HA, the poller validates and clamps it (reusing the `--set` allowlist), writes it to the device, reads it back, and republishes the confirmed value to `mango_power/m/setting/<field>`. Device access is serialized with polling, so a dashboard change never collides with a poll. The current values are also refreshed on every poll, so the controls track changes made elsewhere (e.g. in the vendor app).
 
-> Charge times are in the inverter's local clock. If you use the [DST reconcile](#daylight-saving-for-charge-times), set times there in wall-clock terms rather than from the dashboard.
+> Charge times in HA are **wall-clock** (`LOCAL_TZ`, DST-aware) and are converted to the inverter's fixed-offset clock on write. The registers don't move at a DST transition, so the displayed times shift by an hour then unless you re-enter them or run the [DST reconcile](#daylight-saving-for-charge-times).
 
 ---
 
